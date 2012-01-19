@@ -1,0 +1,194 @@
+#!/usr/bin/env python3
+import sys
+import os
+import re
+import argparse
+from datetime import datetime
+
+DATA_FILE = os.getenv("HOME") + "/.ponto"
+
+def timeToMinutes(time):
+    hour, minutes = time.split(":")
+    return int(hour)*60 + int(minutes)
+
+def minutesToTime(minutes, colorCode = None):
+    positiveMinutes = abs(minutes)
+    if not colorCode:
+        if minutes < 0:
+            colorCode = "\033[0;31m-" # vermelho
+        elif minutes < 2*60:
+            colorCode = " \033[0;32m" # verde
+        else:
+            colorCode = " \033[1;33m" # amarelo
+    suffix = "\033[0m"
+    return "%s%02d:%02d%s" % (colorCode, positiveMinutes/60, positiveMinutes % 60, suffix)
+
+def isWeekendOrHolyday(date):
+    d = date.split('/')
+    weekday = datetime(int(d[2]), int(d[1]), int(d[0])).weekday()
+    #FIXME put a list of holydays here!
+    return weekday > 4
+
+def prettyPrint(date, arrive, departure = "", notes = ""):
+    arriveMinutes = None
+    departureMinutes = None
+    isWeekend = isWeekendOrHolyday(date)
+
+    if arrive:
+        arriveMinutes = timeToMinutes(arrive)
+    if departure:
+        departureMinutes = timeToMinutes(departure)
+
+    if not arrive and not departure: # just a note
+        print("%10s                        \033[1;37m%s\033[0m" % (date,notes))
+        return 0
+    if not arrive:
+        print("%10s      \033[5m?\033[0m  %5s       \033[5m?\033[0m  \033[1;30m%s\033[0m" % (date, departure, notes))
+        return 0
+    elif not departure:
+        timeToGo = arriveMinutes
+        if not isWeekend:
+            timeToGo += (8*60 + 48)
+        if arriveMinutes < (12*60 + 30):
+            timeToGo += 60
+        primeTime = minutesToTime(timeToGo, "\033[1;34m")
+        print("%10s  %5s  %5s       \033[5m?\033[0m  \033[1;30m%s\033[0m" % (date, arrive, primeTime, notes))
+        return 0
+    departureMinutes = timeToMinutes(departure)
+    workedMinutes = departureMinutes - arriveMinutes
+    balanceMinutes = workedMinutes
+    if not isWeekend:
+        balanceMinutes -= 8*60 + 48
+
+    flags = []
+    if arriveMinutes < (12*60 + 30) and workedMinutes > 120:
+        balanceMinutes -= 60
+    else:
+        flags.append("Sem Almoço")
+    if departureMinutes > 22*60:
+        flags.append("Adicional noturno")
+    if workedMinutes > (11*60 + 48):
+        flags.append("\033[1;31mHora Extra\033[0m")
+    notes = notes.strip()
+    if notes:
+        flags.append(notes)
+
+    balance = minutesToTime(balanceMinutes)
+    print("%10s  %5s  %5s  %s  \033[1;30m%s\033[0m" %(date, arrive, departure, balance, ", ".join(flags)))
+
+    # do the 5min margin.
+    return 0 if abs(balanceMinutes) < 5 else balanceMinutes
+
+def printReport():
+    try:
+        f = open(DATA_FILE, "r")
+    except IOError:
+        print("Nenhum ponto registrado.")
+        return
+
+    balanceMinutes = 0
+    for line in f:
+        args = line.strip().split(",", 4)
+        if len(args) == 4:
+            balanceMinutes += prettyPrint(*args)
+
+    print("--------------------------------")
+    print("Saldo: %s" % minutesToTime(balanceMinutes))
+    f.close()
+
+
+class DbUpdater (object):
+    def __init__(self):
+        nowObj = datetime.now()
+        self._today = nowObj.strftime("%d/%m/%Y")
+        self._now = nowObj.strftime("%H:%M")
+        self._dataUpdated = False
+        self._departure = ""
+        self._arrive = ""
+        self.data = []
+        try:
+            f = open(DATA_FILE, "r")
+            self.data = f.readlines()
+            f.close()
+        except IOError:
+            pass
+
+    def update(self):
+        self.data = list(map(self._update, self.data))
+        if not self._dataUpdated:
+            if self._departure:
+                print("Ponto não encontrado.")
+            else:
+                self.addNewEntry()
+        self._dataUpdated = False
+
+    def _update(self, line):
+        if line.startswith(self._today):
+            data = line.split(",", 4)
+
+            if self._departure:
+                data[2] = self._departure
+            if self._arrive:
+                data[1] = self._arrive
+            if self._note:
+                data[3] = self._note
+            data[3] = data[3].strip()
+            self._dataUpdated = True
+            return "%s,%s,%s,%s\n" % tuple(data)
+        else:
+            return line
+
+    def addNewEntry(self):
+        self.data.append("%s,%s,%s,%s\n" % (self._today, self._arrive, self._departure, self._note))
+
+    def save(self):
+        f = open(DATA_FILE, "w")
+        self.data.sort()
+        f.write("".join(self.data))
+        f.close()
+
+def checkTimeFormat(time):
+    if not time:
+        return ""
+    if time == "now":
+        return datetime.now().strftime("%H:%M")
+    p = re.compile('^\d{1,2}:\d{1,2}$')
+    if not p.match(time):
+        raise argparse.ArgumentTypeError("Formato do tempo esta errado!")
+    return time
+
+def checkDateFormat(date):
+    p = re.compile('^\d{1,2}/\d{1,2}/\d{4}$')
+    if not p.match(date):
+        raise argparse.ArgumentTypeError("Formato da data esta errado!")
+    return date
+
+def updateDb(arrive = "", departure = "", note = "", today = ""):
+    updater = DbUpdater()
+    updater._arrive = arrive
+    updater._departure = departure
+    updater._note = note
+    if today:
+        updater._today = today
+    updater.update()
+    updater._arrive = ""
+    updater._departure = ""
+    updater._note = ""
+    updater._today = ""
+    updater.save()
+
+def main():
+    parser = argparse.ArgumentParser(description="Cadastra seu ponto num arquivo txt =]", epilog="Se nenhum argumento for passado, o relatório é impresso na tela. Todas as horas devem ser no formato 24hrs.")
+    parser.add_argument("--arrive", default="", metavar="hh:mm|now", type=checkTimeFormat, help="Seta o tempo de entrada do dia para hh:mm.")
+    parser.add_argument("--departure", default="", metavar="hh:mm|now", type=checkTimeFormat, help="Seta o tempo de saída do dia para hh:mm")
+    parser.add_argument("--today", metavar="dd/mm/yyyy", type=checkDateFormat, help="Finge que hoje é dd/mm para todos os demais comandos.")
+    parser.add_argument("--note", metavar="text", help="Seta uma nota sobre este dia.")
+    args = parser.parse_args(sys.argv[1:])
+
+    if args.arrive or args.departure or args.note:
+        updateDb(args.arrive, args.departure, args.note, args.today)
+    else:
+        printReport()
+
+if __name__ == "__main__":
+    main()
